@@ -14,11 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import keystoneauth1.exceptions.http
 from keystoneclient.v2_0 import client
 from keystoneclient.v3 import client as keystoneclient_v3
 from keystoneclient.auth import token_endpoint
+from keystoneclient.auth.identity import v3
 from keystoneclient import session, exceptions
 from charmhelpers.core.decorators import retry_on_exception
+from charmhelpers.core.hookenv import log
 
 # Early versions of keystoneclient lib do not have an explicit
 # ConnectionRefused
@@ -28,22 +31,31 @@ else:
     econnrefused = exceptions.ConnectionError
 
 
-def _get_keystone_manager_class(endpoint, token, api_version):
+def _get_keystone_manager_class(endpoint, token, api_version, username=None,
+                                password=None, domain_id=None,
+                                project_name=None):
     """Return KeystoneManager class for the given API version
     @param endpoint: the keystone endpoint to point client at
     @param token: the keystone admin_token
     @param api_version: version of the keystone api the client should use
+    @param username: username
+    @param password: password
+    @param domain_id: domain's ID
+    @param project_name: project name
     @returns keystonemanager class used for interrogating keystone
     """
     if api_version == 2:
         return KeystoneManager2(endpoint, token)
     if api_version == 3:
-        return KeystoneManager3(endpoint, token)
+        return KeystoneManager3(endpoint, token, username, password, domain_id,
+                                project_name)
     raise ValueError('No manager found for api version {}'.format(api_version))
 
 
 @retry_on_exception(5, base_delay=3, exc_type=econnrefused)
-def get_keystone_manager(endpoint, token, api_version=None):
+def get_keystone_manager(endpoint, token, api_version=None,
+                         username=None, password=None, domain_id=None,
+                         project_name=None):
     """Return a keystonemanager for the correct API version
 
     If api_version has not been set then create a manager based on the endpoint
@@ -58,33 +70,47 @@ def get_keystone_manager(endpoint, token, api_version=None):
     @param endpoint: the keystone endpoint to point client at
     @param token: the keystone admin_token
     @param api_version: version of the keystone api the client should use
+    @param username: username
+    @param password: password
+    @param domain_id: domain's ID
+    @param project_name: project name
     @returns keystonemanager class used for interrogating keystone
     """
     if api_version:
-        return _get_keystone_manager_class(endpoint, token, api_version)
+        return _get_keystone_manager_class(endpoint, token, api_version,
+                                           username, password, domain_id,
+                                           project_name)
     else:
         if 'v2.0' in endpoint.split('/'):
             manager = _get_keystone_manager_class(endpoint, token, 2)
         else:
-            manager = _get_keystone_manager_class(endpoint, token, 3)
+            manager = _get_keystone_manager_class(endpoint, token, 3, username,
+                                                  password, domain_id,
+                                                  project_name)
+
         if endpoint.endswith('/'):
             base_ep = endpoint.rsplit('/', 2)[0]
         else:
             base_ep = endpoint.rsplit('/', 1)[0]
+
         svc_id = None
         for svc in manager.api.services.list():
             if svc.type == 'identity':
                 svc_id = svc.id
+
         version = None
         for ep in manager.api.endpoints.list():
             if ep.service_id == svc_id and hasattr(ep, 'adminurl'):
                 version = ep.adminurl.split('/')[-1]
+
         if version and version == 'v2.0':
             new_ep = base_ep + "/" + 'v2.0'
             return _get_keystone_manager_class(new_ep, token, 2)
         elif version and version == 'v3':
             new_ep = base_ep + "/" + 'v3'
-            return _get_keystone_manager_class(new_ep, token, 3)
+            return _get_keystone_manager_class(new_ep, token, 3, username,
+                                               password, domain_id,
+                                               project_name)
         else:
             return manager
 
@@ -176,9 +202,37 @@ class KeystoneManager2(KeystoneManager):
 
 class KeystoneManager3(KeystoneManager):
 
-    def __init__(self, endpoint, token):
+    def __init__(self, endpoint, token, username=None, password=None,
+                 domain_id=None, project_name=None):
         self.api_version = 3
-        keystone_auth_v3 = token_endpoint.Token(endpoint=endpoint, token=token)
+        log("username: %s | password: %s | domain_id: %s | project_name: %s"
+            % (username, password, domain_id, project_name))
+        if username and password and domain_id and project_name:
+            keystone_auth_v3 = v3.Password(auth_url=endpoint,
+                                           username=username,
+                                           password=password,
+                                           user_domain_id=domain_id,
+                                           project_domain_id=domain_id,
+                                           project_name=project_name)
+            try:
+                log('Attempting to use user/password')
+                keystone_session_v3 = session.Session(auth=keystone_auth_v3)
+                client = keystoneclient_v3.Client(session=keystone_session_v3)
+                client.users.list()
+                log('user/pass worked')
+            # except (keystoneauth1.exceptions.http.Unauthorized,
+            #         keystoneauth1.exceptions.http.Forbidden):
+            except Exception:
+                # the user/password credentials aren't functional yet
+                # we fallback to the admin-token
+                log('falling back to admin token')
+                keystone_auth_v3 = token_endpoint.Token(endpoint=endpoint,
+                                                        token=token)
+        else:
+            log("using admin token")
+            keystone_auth_v3 = token_endpoint.Token(endpoint=endpoint,
+                                                    token=token)
+
         keystone_session_v3 = session.Session(auth=keystone_auth_v3)
         self.api = keystoneclient_v3.Client(session=keystone_session_v3)
 

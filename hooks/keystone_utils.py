@@ -203,6 +203,7 @@ SSH_USER = 'juju_keystone'
 CA_CERT_PATH = '/usr/local/share/ca-certificates/keystone_juju_ca_cert.crt'
 SSL_SYNC_SEMAPHORE = threading.Semaphore()
 SSL_DIRS = [SSL_DIR, APACHE_SSL_DIR, CA_CERT_PATH]
+ADMIN_USERNAME = 'admin'
 ADMIN_DOMAIN = 'admin_domain'
 DEFAULT_DOMAIN = 'default'
 SERVICE_DOMAIN = 'service_domain'
@@ -774,6 +775,7 @@ def create_or_show_domain(name):
 
 def user_exists(name, domain=None):
     manager = get_manager()
+
     if domain:
         domain_id = manager.resolve_domain_id(domain)
         if not domain_id:
@@ -827,8 +829,13 @@ def create_user(name, password, tenant=None, domain=None):
 def get_manager(api_version=None):
     """Return a keystonemanager for the correct API version"""
     from manager import get_keystone_manager
+
     return get_keystone_manager(get_local_endpoint(), get_admin_token(),
-                                api_version)
+                                api_version,
+                                username=config('admin-user'),
+                                password=get_admin_passwd(),
+                                domain_id=get_admin_domain_id(),
+                                project_name="admin")
 
 
 def create_role(name, user=None, tenant=None, domain=None):
@@ -994,7 +1001,7 @@ def ensure_initial_admin(config):
             admin_domain_id = create_or_show_domain(ADMIN_DOMAIN)
             store_admin_domain_id(admin_domain_id)
             create_or_show_domain(SERVICE_DOMAIN)
-            create_tenant("admin", ADMIN_DOMAIN)
+            create_tenant(ADMIN_USERNAME, ADMIN_DOMAIN)
             create_tenant(config("service-tenant"), SERVICE_DOMAIN)
             leader_set({'service_tenant_id': manager.resolve_tenant_id(
                 config("service-tenant"),
